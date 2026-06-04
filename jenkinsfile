@@ -1,80 +1,81 @@
-pipeline{
-    agent any
-    tools{
-        jdk 'jdk17'
-        nodejs 'node23'
-    }
+pipeline {
+    agent { label 'anett-ec2' }
+
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        DOCKERHUB_USER = 'annevarga'
+        SONAR_URL      = 'https://sonarqube.devopspro.cloud'
     }
+
     stages {
-        stage('clean workspace'){
-            steps{
-                cleanWs()
+        stage('Clean Workspace') {
+            steps { cleanWs() }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'master', url: 'https://github.com/annevarga/devops-swiggy-project.git'
             }
         }
-        stage('Checkout from Git'){
-            steps{
-                git 'https://github.com/KastroVKiran/DevOps-Project-Swiggy.git'
-            }
-        }
-        stage("Sonarqube Analysis "){
-            steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' 
-                    $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=Swiggy \
-                        -Dsonar.projectKey=Swiggy 
-                    '''
+
+        stage('SonarQube Analysis') {
+            steps {
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh """
+                        /home/ubuntu/sonar-scanner/bin/sonar-scanner \
+                          -Dsonar.projectKey=swiggy-anett \
+                          -Dsonar.projectName=swiggy-anett \
+                          -Dsonar.sources=. \
+                          -Dsonar.host.url=${SONAR_URL} \
+                          -Dsonar.token=${SONAR_TOKEN}
+                    """
                 }
             }
         }
-        stage("quality gate"){
-           steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token' 
-                }
-            } 
-        }
+
         stage('Install Dependencies') {
+            steps { sh "npm install" }
+        }
+
+        stage('Trivy Filesystem Scan') {
             steps {
-                sh "npm install"
+                sh "trivy fs . --exit-code 0 --severity HIGH,CRITICAL -f table -o trivy-fs-report.txt"
+                archiveArtifacts artifacts: 'trivy-fs-report.txt', allowEmptyArchive: true
             }
         }
-        stage('OWASP FS SCAN') {
+
+        stage('Docker Build & Push') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-        stage('TRIVY FS SCAN') {
-            steps {
-                sh "trivy fs . > trivyfs.txt"
-            }
-        }
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker'){   
-                       sh "docker build -t swiggy ."
-                       sh "docker tag swiggy kastrov/swiggy:latest "
-                       sh "docker push kastrov/swiggy:latest "
-                    }
+                withCredentials([usernamePassword(credentialsId: 'docker-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh """
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker build -t swiggy .
+                        docker tag swiggy annevarga/swiggy:latest
+                        docker push annevarga/swiggy:latest
+                    """
                 }
             }
         }
-        stage("TRIVY"){
-            steps{
-                sh "trivy image kastrov/swiggy:latest > trivy.txt" 
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image annevarga/swiggy:latest --exit-code 0 --severity HIGH,CRITICAL -f table -o trivy-image-report.txt"
+                archiveArtifacts artifacts: 'trivy-image-report.txt', allowEmptyArchive: true
             }
         }
-        stage('Deploy to container'){
-            steps{
-                sh '''
-                docker rm -f swiggy || true
-                docker run -d --name swiggy -p 3000:3000 kastrov/swiggy:latest
-                '''
+
+        stage('Deploy to Container') {
+            steps {
+                sh """
+                    docker rm -f swiggy || true
+                    docker run -d --name swiggy -p 3000:3000 annevarga/swiggy:latest
+                """
             }
         }
+    }
+
+    post {
+        always { echo "Pipeline execution completed!" }
+        failure { echo "Pipeline failed. Check logs for details." }
+        success { echo "Swiggy App deployed at http://32.192.4.93:3000" }
     }
 }
